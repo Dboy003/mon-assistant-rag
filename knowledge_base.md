@@ -118,7 +118,6 @@ _Corpus source pour l'indexation RAG. Contenu français, un ### par unité séma
 - Analyse comportementale pour identifier des profils à risque
 - Construction d'un score de détection de fraude et segmentation de populations
 - Production de reporting analytique
-- Le lien direct avec mon projet Fraud Detection Banking , des années plus tard.
 
 ### Statisticien — SCI Dar El Salam · Cotonou, Bénin (CDI · oct. 2021–août 2022 (11 mois))
 
@@ -169,11 +168,6 @@ _Corpus source pour l'indexation RAG. Contenu français, un ### par unité séma
 - Employé libre-service
 - Leclerc
 - Job étudiant · 6 mois (2024)
-
-### Citation personnelle
-
-- « L'expérience de chacun est sa vérité. »
-- — Mourad Do Rego
 
 ## Projets
 
