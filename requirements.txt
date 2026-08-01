@@ -5,3 +5,5 @@ groq
 python-dotenv
 langdetect
 google-generativeai
+fastapi
+uvicorn[standard]
