@@ -16,7 +16,7 @@ Usage :
 """
 
 from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
-from sentence_transformers import SentenceTransformer
+from fastembed import TextEmbedding
 import chromadb
 
 # --- 1. Charger le corpus ---
@@ -79,20 +79,19 @@ for doc in final_chunks:
         doc.metadata = {"section": "Introduction"}
 
 # --- 4. Génération des embeddings + indexation ChromaDB ---
-# multilingual-e5-small : bien plus adapté au français que le
-# all-MiniLM-L6-v2 utilisé sur le projet Biomedical RAG (qui, lui,
-# indexe un corpus anglophone - PubMed). Ce modèle attend un préfixe
-# différent selon qu'on encode une question ("query: ") ou un passage
-# de texte à indexer ("passage: ") - c'est une convention propre à la
-# famille E5, à ne pas oublier sous peine de dégrader fortement la
-# qualité du retrieval.
-MODEL_NAME = "intfloat/multilingual-e5-small"
-model = SentenceTransformer(MODEL_NAME)
+# Modèle multilingual supporté par fastembed.
+# On conserve la convention E5 query/passage pour rester cohérent avec
+# la logique de retrieval du module rag.py.
+MODEL_NAME = "intfloat/multilingual-e5-large"
+model = TextEmbedding(model_name=MODEL_NAME)
 
 # On préfixe une copie du texte pour le calcul de l'embedding, mais on
 # garde le texte original (sans préfixe) pour l'affichage des résultats.
+# model.embed() renvoie un générateur (un vecteur numpy par texte en
+# entrée, déjà normalisé) : on le convertit en liste de listes, le
+# format attendu par ChromaDB.
 passage_texts = [f"passage: {c.page_content}" for c in final_chunks]
-embeddings = model.encode(passage_texts, normalize_embeddings=True).tolist()
+embeddings = [vec.tolist() for vec in model.embed(passage_texts)]
 
 # PersistentClient écrit l'index sur disque (dossier ./chroma_db) :
 # contrairement à un client en mémoire, l'index survit au redémarrage

@@ -13,14 +13,14 @@ Usage :
 """
 
 import chromadb
-from sentence_transformers import SentenceTransformer
+from fastembed import TextEmbedding
 
 # --- 1. Se reconnecter à l'index existant ---
 # Même modèle et même réglage de distance ("cosine") que build_index.py :
 # si l'un des deux diffère, les comparaisons de similarité n'ont plus
 # de sens.
-MODEL_NAME = "intfloat/multilingual-e5-small"
-model = SentenceTransformer(MODEL_NAME)
+MODEL_NAME = "intfloat/multilingual-e5-large"
+model = TextEmbedding(model_name=MODEL_NAME)
 
 client = chromadb.PersistentClient(path="./chroma_db")
 collection = client.get_or_create_collection(
@@ -49,8 +49,8 @@ def search(query: str, top_k: int = TOP_K, max_distance: float = MAX_DISTANCE):
     # différent du préfixe "passage: " utilisé à l'indexation - c'est
     # ce qui permet au modèle de bien différencier "je cherche une
     # info" de "voici une info", et d'améliorer la précision du match.
-    query_embedding = model.encode([f"query: {query}"], normalize_embeddings=True).tolist()
-    results = collection.query(query_embeddings=query_embedding, n_results=top_k)
+    query_vector = next(model.embed([f"query: {query}"]))
+    results = collection.query(query_embeddings=[query_vector.tolist()], n_results=top_k)
 
     documents = results["documents"][0]
     metadatas = results["metadatas"][0]

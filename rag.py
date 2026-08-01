@@ -7,6 +7,10 @@ commande) et `main.py` (API FastAPI) importent tous les deux `ask()`
 depuis ce fichier, pour ne jamais avoir deux versions divergentes du
 même comportement.
 
+Configuration :
+    Fichier .env (jamais commité) contenant :
+        GROQ_API_KEY=...
+        GOOGLE_API_KEY=...
 """
 
 import os
@@ -15,7 +19,7 @@ from groq import Groq
 import google.generativeai as genai
 from langdetect import detect
 import chromadb
-from sentence_transformers import SentenceTransformer
+from fastembed import TextEmbedding
 
 # --- 0. Charger les clés API depuis .env ---
 load_dotenv()
@@ -25,14 +29,16 @@ genai.configure(api_key=os.environ["GOOGLE_API_KEY"])
 # --- 1. Charger le contexte statique (toujours injecté) ---
 # os.path.dirname(__file__) plutôt qu'un chemin relatif nu : garantit
 # que ces fichiers sont bien trouvés même si le serveur est lancé
-# depuis un autre dossier de travail.
+# depuis un autre dossier de travail (cas fréquent une fois déployé,
+# par exemple sur Render à l'étape 6).
 _here = os.path.dirname(os.path.abspath(__file__))
 with open(os.path.join(_here, "static_context.md"), encoding="utf-8") as f:
     STATIC_CONTEXT = f.read()
 
 # --- 2. Se reconnecter à l'index ChromaDB ---
-MODEL_NAME = "intfloat/multilingual-e5-small"
-embed_model = SentenceTransformer(MODEL_NAME)
+# Modèle multilingual supporté par fastembed.
+EMBED_MODEL_NAME = "intfloat/multilingual-e5-large"
+embed_model = TextEmbedding(model_name=EMBED_MODEL_NAME)
 client = chromadb.PersistentClient(path=os.path.join(_here, "chroma_db"))
 collection = client.get_or_create_collection(
     name="portfolio_mourad",
@@ -45,10 +51,12 @@ MAX_DISTANCE = 0.22
 
 def retrieve(question: str) -> str:
     """Récupère les chunks pertinents et les met en forme pour le prompt."""
-    query_embedding = embed_model.encode(
-        [f"query: {question}"], normalize_embeddings=True
-    ).tolist()
-    results = collection.query(query_embeddings=query_embedding, n_results=TOP_K)
+    # embed_model.embed() renvoie un générateur d'un vecteur par texte
+    # en entrée (déjà normalisé par fastembed, comme normalize_embeddings=True
+    # le faisait avec sentence-transformers) : on ne passe qu'une seule
+    # question, donc on récupère juste le premier (et unique) vecteur.
+    query_vector = next(embed_model.embed([f"query: {question}"]))
+    results = collection.query(query_embeddings=[query_vector.tolist()], n_results=TOP_K)
 
     documents = results["documents"][0]
     distances = results["distances"][0]
