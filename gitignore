@@ -1,6 +1,6 @@
-﻿venv/
+venv/
 chroma_db/
-chunk_index.json
+chunks_index.json
 __pycache__/
 *.pyc
 .env

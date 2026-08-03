@@ -1,23 +1,46 @@
 """
 build_index.py — Étape 2 : chunking hybride + embeddings du corpus du portfolio.
 
-Construit l'index vectoriel ChromaDB à partir de knowledge_base.md :
+Construit l'index à partir de knowledge_base.md :
 1. Découpage par titres Markdown (## et ###) pour préserver la cohérence sémantique.
 2. Sous-découpage à taille fixe (avec chevauchement) uniquement pour les
    sections qui dépassent la taille cible.
-3. Génération des embeddings (all-MiniLM-L6-v2, comme le projet Biomedical RAG).
-4. Indexation dans une collection ChromaDB persistante locale.
+3. Génération des embeddings via l'API Gemini (gemini-embedding-001).
+4. Sauvegarde dans un simple fichier JSON (chunks_index.json).
+
+Pourquoi pas ChromaDB : conçu pour des bases de milliers/millions de
+vecteurs, ses dépendances (grpcio, kubernetes, opentelemetry...) sont
+disproportionnées pour un corpus de moins de 100 chunks et faisaient
+dépasser les 512 Mo de RAM du tier gratuit de Render. Pour ce volume,
+une recherche par similarité cosinus "à la main" en numpy est aussi
+rapide et ne pèse presque rien en mémoire.
+
+Pourquoi l'API plutôt qu'un modèle local : après plusieurs tentatives
+avec des modèles locaux (PyTorch, puis ONNX) toujours trop lourds ou
+pas assez pertinents pour la recherche question->passage, calculer les
+embeddings via l'API Gemini règle le problème de mémoire à la racine
+(rien à charger en RAM) et restaure une bonne pertinence grâce au
+paramètre task_type, prévu spécifiquement pour ce cas d'usage.
 
 Installation :
-    pip install langchain-text-splitters chromadb sentence-transformers --break-system-packages
+    pip install langchain-text-splitters google-generativeai numpy python-dotenv --break-system-packages
+
+Configuration :
+    Fichier .env contenant GOOGLE_API_KEY=ta_clé_ici
 
 Usage :
     python build_index.py
 """
 
 from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
-from fastembed import TextEmbedding
-import chromadb
+import google.generativeai as genai
+from dotenv import load_dotenv
+import numpy as np
+import json
+import os
+
+load_dotenv()
+genai.configure(api_key=os.environ["GOOGLE_API_KEY"])
 
 # --- 1. Charger le corpus ---
 # knowledge_base.md doit être dans le même dossier que ce script.
@@ -69,61 +92,61 @@ for doc in header_chunks:
 
 print(f"{len(header_chunks)} sections détectées -> {len(final_chunks)} chunks finaux")
 
-# --- 3bis. Garde-fou : ChromaDB refuse un dict de métadonnées vide ---
+# --- 3bis. Garde-fou : valeur de repli pour les métadonnées vides ---
 # Le texte situé avant le tout premier "##" (le titre du document et sa
-# description) n'a ni "section" ni "sous_section" associée, donc son
-# dictionnaire de métadonnées est vide. On lui donne une valeur de
-# repli plutôt que de le laisser planter l'indexation.
+# description) n'a ni "section" ni "sous_section" associée.
 for doc in final_chunks:
     if not doc.metadata:
         doc.metadata = {"section": "Introduction"}
 
-# --- 4. Génération des embeddings + indexation ChromaDB ---
-# Modèle multilingual supporté par fastembed.
-# On conserve la convention E5 query/passage pour rester cohérent avec
-# la logique de retrieval du module rag.py.
-MODEL_NAME = "intfloat/multilingual-e5-large"
-model = TextEmbedding(model_name=MODEL_NAME)
+# --- 4. Génération des embeddings ---
+# API Gemini (gemini-embedding-001) au lieu d'un modèle local : après
+# 3 tentatives côté modèle local (PyTorch trop lourd, ChromaDB trop
+# lourd, modèle compatible ONNX mais moins pertinent pour la recherche
+# question->passage), on calcule les embeddings via l'API plutôt qu'en
+# local. Plus aucun modèle à télécharger ni à charger en mémoire sur
+# Render - le principal compromis est que Google AI devient une
+# dépendance nécessaire pour la recherche elle-même (plus seulement un
+# filet de sécurité de niveau 3 comme pour la génération).
+# task_type="retrieval_document" : indique explicitement à l'API que ce
+# texte fait partie du corpus à retrouver (par opposition à une
+# question) - l'équivalent propre des préfixes "query:"/"passage:" de
+# la famille E5, mais géré nativement par l'API plutôt que par convention.
+EMBED_MODEL = "models/gemini-embedding-001"
 
-# On préfixe une copie du texte pour le calcul de l'embedding, mais on
-# garde le texte original (sans préfixe) pour l'affichage des résultats.
-# model.embed() renvoie un générateur (un vecteur numpy par texte en
-# entrée, déjà normalisé) : on le convertit en liste de listes, le
-# format attendu par ChromaDB.
-passage_texts = [f"passage: {c.page_content}" for c in final_chunks]
-embeddings = [vec.tolist() for vec in model.embed(passage_texts)]
+passage_texts = [c.page_content for c in final_chunks]
 
-# PersistentClient écrit l'index sur disque (dossier ./chroma_db) :
-# contrairement à un client en mémoire, l'index survit au redémarrage
-# du script, donc on ne recalcule pas les embeddings à chaque fois.
-client = chromadb.PersistentClient(path="./chroma_db")
-
-# On supprime la collection existante avant de la recréer : sans ça,
-# relancer ce script plusieurs fois (par ex. après avoir modifié
-# knowledge_base.md) accumule les anciens ET les nouveaux chunks côte
-# à côte, avec des ID en collision que ChromaDB ignore silencieusement
-# au lieu de les mettre à jour. Ce script doit rester idempotent :
-# le relancer doit toujours donner un index propre, reflétant
-# uniquement le contenu actuel de knowledge_base.md.
-try:
-    client.delete_collection(name="portfolio_mourad")
-except Exception:
-    pass  # la collection n'existe pas encore lors du tout premier lancement
-
-# metadata={"hnsw:space": "cosine"} : les embeddings E5 sont conçus
-# pour être comparés par similarité cosinus (d'où le
-# normalize_embeddings=True ci-dessus) plutôt que par distance
-# euclidienne, qui est le réglage par défaut de ChromaDB.
-collection = client.get_or_create_collection(
-    name="portfolio_mourad",
-    metadata={"hnsw:space": "cosine"},
+result = genai.embed_content(
+    model=EMBED_MODEL,
+    content=passage_texts,
+    task_type="retrieval_document",
 )
 
-collection.add(
-    ids=[f"chunk_{i}" for i in range(len(final_chunks))],
-    documents=[c.page_content for c in final_chunks],
-    embeddings=embeddings,
-    metadatas=[c.metadata for c in final_chunks],
-)
+# Normalisation manuelle défensive : même si l'API renvoie déjà des
+# vecteurs normalisés dans la plupart des cas, on ne suppose plus rien
+# après s'être fait surprendre deux fois par cette hypothèse - la
+# division par la norme L2 est sans risque même si c'était déjà fait.
+def normalize(vec):
+    vec = np.array(vec, dtype=np.float32)
+    return (vec / np.linalg.norm(vec)).tolist()
 
-print(f"Index ChromaDB créé dans ./chroma_db avec {collection.count()} chunks.")
+embeddings = [normalize(vec) for vec in result["embedding"]]
+
+# --- 5. Sauvegarde dans un fichier JSON unique ---
+# Un seul fichier plat, sans base de données : { texte, métadonnées,
+# vecteur } pour chaque chunk. Chargé intégralement en mémoire au
+# démarrage du serveur (quelques dizaines de Ko pour ce corpus), puis
+# parcouru par similarité cosinus - voir rag.py.
+index_data = [
+    {
+        "text": c.page_content,
+        "metadata": c.metadata,
+        "embedding": emb,
+    }
+    for c, emb in zip(final_chunks, embeddings)
+]
+
+with open("chunks_index.json", "w", encoding="utf-8") as f:
+    json.dump(index_data, f, ensure_ascii=False)
+
+print(f"Index créé dans chunks_index.json avec {len(index_data)} chunks.")

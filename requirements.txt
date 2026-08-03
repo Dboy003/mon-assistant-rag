@@ -1,6 +1,5 @@
 langchain-text-splitters
-chromadb
-fastembed
+numpy
 groq
 python-dotenv
 langdetect

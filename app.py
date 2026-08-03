@@ -39,7 +39,7 @@ app = FastAPI(
 # pourrait alors appeler ton API et consommer ton quota Groq/Gemini).
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://dboy003.github.io", "http://localhost:8000", "http://127.0.0.1:5500"],
+    allow_origins=["https://dboy003.github.io", "http://localhost:8010", "http://127.0.0.1:5500"],
     allow_methods=["POST", "GET"],
     allow_headers=["*"],
 )

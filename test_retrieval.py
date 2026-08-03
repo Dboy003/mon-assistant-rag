@@ -1,82 +1,90 @@
 """
-test_retrieval.py — Étape 3 : test du pipeline de recherche vectorielle.
+test_retrieval.py — Étape 3 : test du pipeline de recherche.
 
-Interroge l'index ChromaDB construit par build_index.py et affiche les
-passages les plus pertinents pour une question donnée, avec leur score
-de similarité et leur provenance (section/sous-section). Sert à valider
-la qualité du retrieval AVANT de brancher le LLM (étape 4) : si les bons
-passages ne remontent pas ici, aucun réglage du prompt ne rattrapera ça.
+Interroge l'index (chunks_index.json) construit par build_index.py et
+affiche les passages les plus pertinents pour une question donnée, avec
+leur score de similarité et leur provenance (section/sous-section).
+Sert à valider la qualité du retrieval AVANT de brancher le LLM
+(étape 4) : si les bons passages ne remontent pas ici, aucun réglage du
+prompt ne rattrapera ça.
 
 Usage :
     python test_retrieval.py
     (puis tape tes questions, une par une ; "quit" pour sortir)
 """
 
-import chromadb
-from fastembed import TextEmbedding
+import os
+import json
+from dotenv import load_dotenv
+import google.generativeai as genai
+import numpy as np
 
-# --- 1. Se reconnecter à l'index existant ---
-# Même modèle et même réglage de distance ("cosine") que build_index.py :
-# si l'un des deux diffère, les comparaisons de similarité n'ont plus
-# de sens.
-MODEL_NAME = "intfloat/multilingual-e5-large"
-model = TextEmbedding(model_name=MODEL_NAME)
+# --- 1. Charger l'index existant ---
+# Embeddings via l'API Gemini (comme build_index.py et rag.py) plutôt
+# qu'un modèle local : voir build_index.py pour l'historique complet
+# des tentatives (PyTorch trop lourd, ChromaDB trop lourd, modèle ONNX
+# compatible mais peu pertinent). Pas de base de données vectorielle
+# non plus : juste un JSON chargé en mémoire et une recherche par
+# similarité cosinus en numpy.
+load_dotenv()
+genai.configure(api_key=os.environ["GOOGLE_API_KEY"])
+EMBED_MODEL = "models/gemini-embedding-001"
 
-client = chromadb.PersistentClient(path="./chroma_db")
-collection = client.get_or_create_collection(
-    name="portfolio_mourad",
-    metadata={"hnsw:space": "cosine"},
-)
+with open("chunks_index.json", encoding="utf-8") as f:
+    _index_data = json.load(f)
+
+_chunk_texts = [c["text"] for c in _index_data]
+_chunk_metadatas = [c["metadata"] for c in _index_data]
+_chunk_embeddings = np.array([c["embedding"] for c in _index_data], dtype=np.float32)
 
 # TOP_K : nombre MAXIMUM de passages retournés par requête (plafond,
 # pas un objectif fixe - voir MAX_DISTANCE ci-dessous).
-TOP_K = 4
+TOP_K = 6
 
-# MAX_DISTANCE : au-delà de ce seuil, un chunk est jugé trop peu
-# pertinent pour être gardé, même s'il reste de la place dans TOP_K.
-# 0.22 est calibré à partir des observations de test : les bons
-# matches se situent autour de 0.13-0.17, donc ce seuil les inclut tous
-# largement, tout en excluant les correspondances faibles et génériques
-# (ex. un chunk "Contact" qui ne parle d'aucun sujet précis et devient
-# donc "moyennement proche" de beaucoup de questions sans être
-# franchement pertinent pour aucune).
-MAX_DISTANCE = 0.22
+# MAX_DISTANCE : calibré à partir des observations de test - les bons
+# matches se situent autour de 0.26-0.32 avec ce modèle, le bruit
+# commence à apparaître à partir de ~0.34.
+MAX_DISTANCE = 0.33
 
 
 def search(query: str, top_k: int = TOP_K, max_distance: float = MAX_DISTANCE):
     """Interroge l'index et affiche les résultats de façon lisible."""
-    # Le modèle E5 attend le préfixe "query: " pour une question,
-    # différent du préfixe "passage: " utilisé à l'indexation - c'est
-    # ce qui permet au modèle de bien différencier "je cherche une
-    # info" de "voici une info", et d'améliorer la précision du match.
-    query_vector = next(model.embed([f"query: {query}"]))
-    results = collection.query(query_embeddings=[query_vector.tolist()], n_results=top_k)
+    # task_type="retrieval_query" : même logique que rag.py, signale à
+    # l'API que ce texte est une question, pas un document du corpus.
+    result = genai.embed_content(
+        model=EMBED_MODEL,
+        content=query,
+        task_type="retrieval_query",
+    )
+    query_vector = np.array(result["embedding"], dtype=np.float32)
+    query_vector = query_vector / np.linalg.norm(query_vector)
 
-    documents = results["documents"][0]
-    metadatas = results["metadatas"][0]
-    # Avec la distance cosinus, on obtient ici une valeur entre 0 (identique)
-    # et 2 (opposé) ; en pratique, un bon match tombe sous ~0.3-0.4.
-    distances = results["distances"][0]
+    # Vecteurs normalisés -> le produit scalaire donne directement la
+    # similarité cosinus. On la reconvertit en "distance" (0 = identique).
+    similarities = _chunk_embeddings @ query_vector
+    distances = 1 - similarities
+    top_indices = np.argsort(distances)[:top_k]
 
     print(f"\n--- Résultats pour : « {query} » ---")
     kept = 0
-    for i, (doc, meta, dist) in enumerate(zip(documents, metadatas, distances), start=1):
+    for rank, i in enumerate(top_indices, start=1):
+        dist = distances[i]
         if dist > max_distance:
-            # On ne s'arrête pas : les distances sont déjà triées par
-            # ordre croissant, donc tout ce qui suit sera encore pire.
-            break
+            break  # trié par distance croissante : le reste sera pire
         kept += 1
+        meta = _chunk_metadatas[i]
         section = meta.get("section", "?")
         sous_section = meta.get("sous_section", "")
         provenance = f"{section} > {sous_section}" if sous_section else section
-        print(f"\n[{i}] distance={dist:.3f} | {provenance}")
+        print(f"\n[{rank}] distance={dist:.3f} | {provenance}")
+        doc = _chunk_texts[i]
         print(doc[:300] + ("..." if len(doc) > 300 else ""))
     if kept == 0:
         print("(aucun résultat suffisamment pertinent)")
 
 
 if __name__ == "__main__":
-    print(f"Index chargé : {collection.count()} chunks disponibles.")
+    print(f"Index chargé : {len(_chunk_texts)} chunks disponibles.")
     print("Tape une question (ou 'quit' pour sortir).\n")
 
     while True:

@@ -14,12 +14,12 @@ Configuration :
 """
 
 import os
+import json
 from dotenv import load_dotenv
 from groq import Groq
 import google.generativeai as genai
 from langdetect import detect
-import chromadb
-from fastembed import TextEmbedding
+import numpy as np
 
 # --- 0. Charger les clés API depuis .env ---
 load_dotenv()
@@ -35,33 +35,65 @@ _here = os.path.dirname(os.path.abspath(__file__))
 with open(os.path.join(_here, "static_context.md"), encoding="utf-8") as f:
     STATIC_CONTEXT = f.read()
 
-# --- 2. Se reconnecter à l'index ChromaDB ---
-# Modèle multilingual supporté par fastembed.
-EMBED_MODEL_NAME = "intfloat/multilingual-e5-large"
-embed_model = TextEmbedding(model_name=EMBED_MODEL_NAME)
-client = chromadb.PersistentClient(path=os.path.join(_here, "chroma_db"))
-collection = client.get_or_create_collection(
-    name="portfolio_mourad",
-    metadata={"hnsw:space": "cosine"},
-)
+# --- 2. Charger l'index (embeddings + textes + métadonnées) ---
+# API Gemini (gemini-embedding-001) au lieu d'un modèle local : après
+# plusieurs tentatives avec des modèles locaux (voir build_index.py
+# pour l'historique complet des essais), calculer les embeddings via
+# l'API règle le problème de mémoire à la racine (rien à charger en
+# RAM au démarrage du serveur) et restaure une bonne pertinence grâce
+# au paramètre task_type, prévu spécifiquement pour la recherche
+# question -> passage.
+EMBED_MODEL = "models/gemini-embedding-001"
+
+# Pas de base de données vectorielle : pour ~50 chunks, ChromaDB
+# (grpcio, kubernetes, opentelemetry...) coûtait plus de RAM à charger
+# que tout le reste du pipeline réuni, et faisait dépasser les 512 Mo
+# de Render. On charge simplement le JSON produit par build_index.py
+# et on cherche par similarité cosinus en numpy - quelques dizaines de
+# Ko en mémoire, recherche quasi instantanée à cette échelle.
+with open(os.path.join(_here, "chunks_index.json"), encoding="utf-8") as f:
+    _index_data = json.load(f)
+
+_chunk_texts = [c["text"] for c in _index_data]
+_chunk_metadatas = [c["metadata"] for c in _index_data]
+# Une seule matrice (n_chunks, dim) plutôt que n vecteurs séparés :
+# permet de calculer toutes les similarités d'un coup (un seul produit
+# matriciel) plutôt qu'une boucle Python chunk par chunk.
+_chunk_embeddings = np.array([c["embedding"] for c in _index_data], dtype=np.float32)
 
 TOP_K = 6
-MAX_DISTANCE = 0.22
+MAX_DISTANCE = 0.33
 
 
 def retrieve(question: str) -> str:
     """Récupère les chunks pertinents et les met en forme pour le prompt."""
-    # embed_model.embed() renvoie un générateur d'un vecteur par texte
-    # en entrée (déjà normalisé par fastembed, comme normalize_embeddings=True
-    # le faisait avec sentence-transformers) : on ne passe qu'une seule
-    # question, donc on récupère juste le premier (et unique) vecteur.
-    query_vector = next(embed_model.embed([f"query: {question}"]))
-    results = collection.query(query_embeddings=[query_vector.tolist()], n_results=TOP_K)
+    # task_type="retrieval_query" : signale à l'API que ce texte est une
+    # question de recherche (par opposition à un document du corpus,
+    # voir task_type="retrieval_document" dans build_index.py) - c'est
+    # ce qui permet à l'API de produire un vecteur bien positionné par
+    # rapport aux documents pertinents, même si la question et sa
+    # réponse ne se ressemblent pas lexicalement.
+    result = genai.embed_content(
+        model=EMBED_MODEL,
+        content=question,
+        task_type="retrieval_query",
+    )
+    query_vector = np.array(result["embedding"], dtype=np.float32)
+    # Normalisation défensive (voir build_index.py pour le raisonnement).
+    query_vector = query_vector / np.linalg.norm(query_vector)
 
-    documents = results["documents"][0]
-    distances = results["distances"][0]
+    # Les vecteurs étant normalisés, un simple produit scalaire donne
+    # directement la similarité cosinus (entre -1 et 1, 1 = identique).
+    similarities = _chunk_embeddings @ query_vector
+    # On reconvertit en "distance" (0 = identique) pour raisonner avec
+    # un seuil intuitif.
+    distances = 1 - similarities
 
-    kept = [doc for doc, dist in zip(documents, distances) if dist <= MAX_DISTANCE]
+    # Indices triés par distance croissante (les plus proches d'abord),
+    # puis on ne garde que les TOP_K meilleurs.
+    top_indices = np.argsort(distances)[:TOP_K]
+
+    kept = [_chunk_texts[i] for i in top_indices if distances[i] <= MAX_DISTANCE]
     if not kept:
         return ""
     return "\n\n---\n\n".join(kept)
