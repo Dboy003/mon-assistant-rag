@@ -33,13 +33,17 @@ app = FastAPI(
 # CORS : par défaut, un navigateur bloque les appels JS depuis
 # GitHub Pages (dboy003.github.io) vers une API sur un autre domaine
 # (Render), sauf si le serveur autorise explicitement cette origine.
-# ⚠️ À REMPLACER par le vrai domaine du portfolio une fois en ligne -
-# "*" ci-dessous est volontairement permissif pour les tests en local,
-# mais ne doit pas rester tel quel en production (n'importe quel site
-# pourrait alors appeler ton API et consommer ton quota Groq/Gemini).
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://dboy003.github.io", "http://localhost:8010", "http://127.0.0.1:5500"],
+    allow_origins=[
+        "https://dboy003.github.io",
+        "https://mouradodorego.me",
+        "https://www.mouradodorego.me",
+        "http://mouradodorego.me",  # au cas où le HTTPS n'est pas encore pleinement provisionné
+        "http://localhost:8000",
+        "http://127.0.0.1:5500",
+    ],
     allow_methods=["POST", "GET"],
     allow_headers=["*"],
 )
@@ -62,7 +66,8 @@ def root():
 
 @app.get("/-/healthy")
 def health():
-    """Endpoint de santé dédié au monitoring (UptimeRobot)."""
+    """Endpoint de santé dédié au monitoring (UptimeRobot), même
+    convention que sur le projet Fraud Detection Banking."""
     return {"status": "healthy"}
 
 
