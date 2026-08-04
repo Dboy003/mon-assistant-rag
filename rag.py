@@ -61,6 +61,18 @@ _chunk_metadatas = [c["metadata"] for c in _index_data]
 # matriciel) plutôt qu'une boucle Python chunk par chunk.
 _chunk_embeddings = np.array([c["embedding"] for c in _index_data], dtype=np.float32)
 
+# Table titre -> texte du chunk correspondant (un projet, une
+# expérience...), construite à partir des ### du corpus. Sert à
+# l'expansion par référence croisée ci-dessous : un chunk peut citer un
+# projet par son nom sans être lui-même le chunk détaillé de ce projet
+# (ex. une FAQ qui dit "mon projet préféré est le Biomedical RAG-LLM"
+# sans donner les détails techniques, qui vivent dans un autre chunk).
+_title_to_chunk = {
+    c["metadata"]["sous_section"]: c["text"]
+    for c in _index_data
+    if c["metadata"].get("sous_section")
+}
+
 TOP_K = 6
 MAX_DISTANCE = 0.33
 
@@ -94,6 +106,17 @@ def retrieve(question: str) -> str:
     top_indices = np.argsort(distances)[:TOP_K]
 
     kept = [_chunk_texts[i] for i in top_indices if distances[i] <= MAX_DISTANCE]
+
+    # Expansion par référence croisée : si un chunk gardé mentionne un
+    # titre exact (un projet, une expérience) présent dans le corpus,
+    # on ajoute aussi CE chunk-là, même si sa propre distance dépasse le
+    # seuil. Corrige le cas où seul un chunk "à propos de" (FAQ, résumé)
+    # remonte, sans le chunk factuel détaillé qu'il cite.
+    for text in list(kept):
+        for title, chunk_text in _title_to_chunk.items():
+            if title in text and chunk_text not in kept:
+                kept.append(chunk_text)
+
     if not kept:
         return ""
     return "\n\n---\n\n".join(kept)

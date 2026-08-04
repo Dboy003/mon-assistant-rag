@@ -37,6 +37,14 @@ _chunk_texts = [c["text"] for c in _index_data]
 _chunk_metadatas = [c["metadata"] for c in _index_data]
 _chunk_embeddings = np.array([c["embedding"] for c in _index_data], dtype=np.float32)
 
+# Même table titre -> chunk que rag.py, pour que ce script de debug
+# affiche fidèlement ce qu'ask() recevra vraiment en production.
+_title_to_chunk = {
+    c["metadata"]["sous_section"]: c["text"]
+    for c in _index_data
+    if c["metadata"].get("sous_section")
+}
+
 # TOP_K : nombre MAXIMUM de passages retournés par requête (plafond,
 # pas un objectif fixe - voir MAX_DISTANCE ci-dessous).
 TOP_K = 6
@@ -66,6 +74,7 @@ def search(query: str, top_k: int = TOP_K, max_distance: float = MAX_DISTANCE):
     top_indices = np.argsort(distances)[:top_k]
 
     print(f"\n--- Résultats pour : « {query} » ---")
+    kept_texts = []
     kept = 0
     for rank, i in enumerate(top_indices, start=1):
         dist = distances[i]
@@ -78,9 +87,20 @@ def search(query: str, top_k: int = TOP_K, max_distance: float = MAX_DISTANCE):
         provenance = f"{section} > {sous_section}" if sous_section else section
         print(f"\n[{rank}] distance={dist:.3f} | {provenance}")
         doc = _chunk_texts[i]
+        kept_texts.append(doc)
         print(doc[:300] + ("..." if len(doc) > 300 else ""))
     if kept == 0:
         print("(aucun résultat suffisamment pertinent)")
+
+    # Expansion par référence croisée (identique à rag.py) : affichée
+    # séparément pour bien voir ce qu'elle ajoute par rapport au classement
+    # par similarité pure ci-dessus.
+    for text in list(kept_texts):
+        for title, chunk_text in _title_to_chunk.items():
+            if title in text and chunk_text not in kept_texts:
+                kept_texts.append(chunk_text)
+                print(f"\n[+ expansion] {title}")
+                print(chunk_text[:300] + ("..." if len(chunk_text) > 300 else ""))
 
 
 if __name__ == "__main__":
