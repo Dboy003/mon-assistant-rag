@@ -15,9 +15,12 @@ Test rapide (dans un autre terminal) :
     curl -X POST http://localhost:8000/chat -H "Content-Type: application/json" -d "{\"message\": \"Parle-moi de Carrefour\"}"
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 from rag import ask  # importer rag.py charge les modèles UNE SEULE FOIS
                       # au démarrage du serveur (pas à chaque requête) :
@@ -29,6 +32,17 @@ app = FastAPI(
     description="API du chatbot RAG interrogeant le corpus du portfolio.",
     version="1.0.0",
 )
+
+# Rate limiting : protège le quota gratuit Groq/Gemini, partagé entre
+# TOUS les visiteurs du portfolio (pas un quota par personne). Sans
+# ça, un seul visiteur malveillant qui spamme /chat pourrait épuiser
+# le quota du jour pour tout le monde. get_remote_address identifie
+# le visiteur par IP (voir la note sur --proxy-headers plus bas, sinon
+# tout le trafic derrière le proxy de Render seraît vu comme une seule
+# IP et la limite s'appliquerait globalement au lieu de par visiteur).
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # CORS : par défaut, un navigateur bloque les appels JS depuis
 # GitHub Pages (dboy003.github.io) vers une API sur un autre domaine
@@ -75,7 +89,8 @@ def health():
 
 
 @app.post("/chat", response_model=ChatResponse)
-def chat(req: ChatRequest):
+@limiter.limit("10/minute;50/day")
+def chat(req: ChatRequest, request: Request):
     try:
         reply = ask(req.message)
     except Exception as e:
